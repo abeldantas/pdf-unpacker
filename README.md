@@ -1,6 +1,6 @@
 # PDF Unpacker
 
-A tool to convert PDF files to Markdown format while preserving images by uploading them to Imgur. Perfect for making your PDFs AI-processable and editable.
+A tool to convert PDF files to Markdown format while preserving images by uploading them to Imgur.
 
 ## Features
 
