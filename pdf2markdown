@@ -8,9 +8,31 @@
 set -e
 
 # Check dependencies
-command -v pandoc >/dev/null 2>&1 || { echo "Error: pandoc is required but not installed. Aborting."; exit 1; }
-command -v curl >/dev/null 2>&1 || { echo "Error: curl is required but not installed. Aborting."; exit 1; }
-command -v jq >/dev/null 2>&1 || { echo "Error: jq is required but not installed. Aborting."; exit 1; }
+check_dependency() {
+  local cmd=$1
+  local install_instructions=$2
+  if ! command -v $cmd >/dev/null 2>&1; then
+    echo "Error: $cmd is required but not installed."
+    echo "$install_instructions"
+    exit 1
+  fi
+}
+
+check_dependency npx "Install with: npm install -g npx"
+check_dependency curl "Install with:
+  - Ubuntu/Debian: sudo apt-get install curl
+  - MacOS: brew install curl
+  - Windows: choco install curl"
+check_dependency jq "Install with:
+  - Ubuntu/Debian: sudo apt-get install jq
+  - MacOS: brew install jq
+  - Windows: choco install jq"
+
+# Check if @opendocsg/pdf2md is installed
+if ! npm list -g @opendocsg/pdf2md >/dev/null 2>&1 && ! npm list @opendocsg/pdf2md >/dev/null 2>&1; then
+  echo "Installing @opendocsg/pdf2md..."
+  npm install @opendocsg/pdf2md
+fi
 
 # Load environment variables
 if [ -f .env ]; then
@@ -37,90 +59,160 @@ convert_single_pdf() {
     return 1
   fi
 
-  # Create a temporary directory for image extraction
+  # Create a temporary directory
   local TEMP_DIR="temp_$(date +%s)"
-  mkdir -p "$TEMP_DIR"
-
+  mkdir -p "$TEMP_DIR/input" "$TEMP_DIR/output"
+  
+  # Copy input file to temp directory
+  cp "$INPUT_PDF" "$TEMP_DIR/input/"
+  
   echo "Converting PDF to Markdown..."
-  pandoc -f pdf -t markdown "$INPUT_PDF" -o "$TEMP_DIR/temp.md" --extract-media="$TEMP_DIR"
-
-  # Find all images in the markdown file
-  echo "Processing images..."
-  local IMAGE_REFS=$(grep -o '!\[.*\](.*media/.*\.[a-zA-Z]*\([ )]"\{0,1\}[^"]*"\{0,1\}[ )]\))' "$TEMP_DIR/temp.md" || true)
-
-  # Copy the markdown file for processing
-  cp "$TEMP_DIR/temp.md" "$TEMP_DIR/processed.md"
-
-  # Count for progress tracking
-  local TOTAL_IMAGES=$(echo "$IMAGE_REFS" | wc -l)
-  local CURRENT=0
-
-  # Process each image reference
-  echo "$IMAGE_REFS" | while read -r REF; do
-    if [ -z "$REF" ]; then
-      continue
-    fi
+  npx @opendocsg/pdf2md --inputFolderPath="$TEMP_DIR/input" --outputFolderPath="$TEMP_DIR/output"
+  
+  # Get the converted file
+  local FILE_BASE=$(basename "$INPUT_PDF" .pdf)
+  local TEMP_OUTPUT="$TEMP_DIR/output/$FILE_BASE.md"
+  
+  if [ ! -f "$TEMP_OUTPUT" ]; then
+    echo "Error: Conversion failed. No output file was generated."
+    rm -rf "$TEMP_DIR"
+    return 1
+  fi
+  
+  # Extract images from PDF (this is a bit tricky since pdf2md doesn't extract images)
+  # We'll use pdfimages if available, otherwise skip image extraction
+  local HAS_IMAGES=false
+  if command -v pdfimages >/dev/null 2>&1; then
+    echo "Extracting images from PDF..."
+    mkdir -p "$TEMP_DIR/images"
     
-    CURRENT=$((CURRENT + 1))
+    # Extract image information including page numbers
+    local IMAGE_INFO=$(pdfimages -list "$INPUT_PDF" 2>/dev/null)
     
-    # Extract the image path
-    local IMAGE_PATH=$(echo "$REF" | sed -n 's/.*(\(.*\)).*/\1/p')
+    # Extract the images
+    pdfimages -j "$INPUT_PDF" "$TEMP_DIR/images/img" >/dev/null 2>&1 || true
     
-    # Clean up the path (remove potential quotes)
-    IMAGE_PATH=$(echo "$IMAGE_PATH" | tr -d '"')
-    
-    # Make the path absolute if it's relative to the temp dir
-    local FULL_PATH
-    if [[ "$IMAGE_PATH" == *"$TEMP_DIR"* ]]; then
-      FULL_PATH="$IMAGE_PATH"
+    # Check if any images were extracted
+    if [ -n "$(ls -A "$TEMP_DIR/images" 2>/dev/null)" ]; then
+      HAS_IMAGES=true
+      echo "Found images in the PDF."
+      
+      # Convert any PPM files to JPG if ImageMagick's convert is available
+      if command -v convert >/dev/null 2>&1; then
+        echo "Converting PPM images to JPG format..."
+        find "$TEMP_DIR/images" -name "*.ppm" -type f | while read -r PPM_FILE; do
+          JPG_FILE="${PPM_FILE%.ppm}.jpg"
+          convert "$PPM_FILE" "$JPG_FILE" && rm "$PPM_FILE"
+        done
+      else
+        echo "Warning: ImageMagick not found. PPM images may not upload properly to Imgur."
+        echo "To convert PPM images, install ImageMagick."
+      fi
+      
+      # Parse image info to get page numbers for each image
+      local PAGE_INFO=$(echo "$IMAGE_INFO" | grep -v "^$" | tail -n +2)
+      # Save the parsed info to a temporary file for reference
+      echo "$PAGE_INFO" > "$TEMP_DIR/image_info.txt"
     else
-      FULL_PATH="$TEMP_DIR/$IMAGE_PATH"
+      echo "No images found in the PDF."
     fi
+  else
+    echo "Warning: pdfimages not found. Skipping image extraction."
+    echo "To extract images, install pdfimages (poppler-utils package)."
+  fi
+  
+  # If we have images, upload them to Imgur
+  if [ "$HAS_IMAGES" = true ]; then
+    echo "Processing images..."
+    local IMAGE_FILES=$(find "$TEMP_DIR/images" -type f | sort)
+    local TOTAL_IMAGES=$(echo "$IMAGE_FILES" | wc -l)
+    local CURRENT=0
     
-    # Check if file exists
-    if [ ! -f "$FULL_PATH" ]; then
-      echo "Warning: Image file not found: $FULL_PATH"
-      continue
-    fi
+    # Create a temporary file to store image references
+    local IMGUR_URLS="$TEMP_DIR/imgur_urls.txt"
+    touch "$IMGUR_URLS"
     
-    echo "[$CURRENT/$TOTAL_IMAGES] Uploading $(basename "$FULL_PATH") to Imgur..."
+    # Read the markdown content
+    local MD_CONTENT=$(cat "$TEMP_OUTPUT")
     
-    # Upload the image to Imgur
-    local RESPONSE=$(curl -s -X POST \
-      "https://api.imgur.com/3/image" \
-      -H "Authorization: Bearer $IMGUR_ACCESS_TOKEN" \
-      -F "image=@$FULL_PATH")
+    # First, upload all images and store their URLs
+    echo "$IMAGE_FILES" | while read -r IMAGE_FILE; do
+      CURRENT=$((CURRENT + 1))
+      local IMAGE_NAME=$(basename "$IMAGE_FILE")
+      local IMG_NUM=$(echo "$IMAGE_NAME" | grep -o -E '[0-9]+' | head -1)
+      
+      echo "[$CURRENT/$TOTAL_IMAGES] Uploading $IMAGE_NAME to Imgur..."
+      
+      # Upload the image to Imgur
+      local RESPONSE=$(curl -s -X POST \
+        "https://api.imgur.com/3/image" \
+        -H "Authorization: Bearer $IMGUR_ACCESS_TOKEN" \
+        -F "image=@$IMAGE_FILE")
+      
+      # Extract the image URL from the response
+      local IMGUR_URL=$(echo "$RESPONSE" | jq -r '.data.link')
+      
+      if [[ "$IMGUR_URL" == "null" || -z "$IMGUR_URL" ]]; then
+        echo "Error uploading image to Imgur:"
+        echo "$RESPONSE" | jq '.'
+        continue
+      fi
+      
+      echo "Image uploaded successfully: $IMGUR_URL"
+      
+      # Add image reference to markdown file - since we can't reliably
+      # determine exact placement, we'll spread them evenly throughout
+      echo "![Image $CURRENT]($IMGUR_URL)" >> "$IMGUR_URLS"
+    done
     
-    # Extract the image URL from the response
-    local IMGUR_URL=$(echo "$RESPONSE" | jq -r '.data.link')
+    # Now, let's distribute the images into the markdown content
+    local MD_LINES=$(echo "$MD_CONTENT" | wc -l)
+    local IMAGES=$(cat "$IMGUR_URLS")
+    local IMG_COUNT=$(echo "$IMAGES" | wc -l)
     
-    if [[ "$IMGUR_URL" == "null" || -z "$IMGUR_URL" ]]; then
-      echo "Error uploading image to Imgur:"
-      echo "$RESPONSE" | jq '.'
-      continue
-    fi
+    # We'll divide the document into sections and place 
+    # each image at approximately the end of each section
+    local NEW_MD=""
+    local SECTION_SIZE=$((MD_LINES / (IMG_COUNT + 1)))
     
-    echo "Image uploaded successfully: $IMGUR_URL"
+    local START=1
+    local IMG_INDEX=1
     
-    # Escape special characters in the reference for sed
-    local ESCAPED_REF=$(echo "$REF" | sed 's/[\/&]/\\&/g')
+    # Add images evenly spaced through the document
+    for i in $(seq 1 $IMG_COUNT); do
+      local END=$((START + SECTION_SIZE))
+      # Extract section
+      local SECTION=$(echo "$MD_CONTENT" | sed -n "${START},${END}p")
+      # Add section to new markdown
+      NEW_MD="$NEW_MD$SECTION"
+      # Get the next image
+      local IMG=$(echo "$IMAGES" | sed -n "${i}p")
+      # Add image after section
+      NEW_MD="$NEW_MD\n\n$IMG\n\n"
+      
+      START=$((END + 1))
+    done
     
-    # Create the new reference with Imgur URL
-    local NEW_REF=$(echo "$REF" | sed "s#(.*#($IMGUR_URL)#")
-    local ESCAPED_NEW_REF=$(echo "$NEW_REF" | sed 's/[\/&]/\\&/g')
+    # Add the remaining content
+    local REMAINING=$(echo "$MD_CONTENT" | sed -n "${START},${MD_LINES}p")
+    NEW_MD="$NEW_MD$REMAINING"
     
-    # Replace the image reference in the markdown file
-    sed -i "s#$ESCAPED_REF#$ESCAPED_NEW_REF#g" "$TEMP_DIR/processed.md"
-  done
-
-  # Copy the processed file to the final destination
-  cp "$TEMP_DIR/processed.md" "$OUTPUT_MD"
-
+    # Write the new markdown with images distributed
+    echo -e "$NEW_MD" > "$OUTPUT_MD"
+  else
+    # Just use the original converted file
+    cp "$TEMP_OUTPUT" "$OUTPUT_MD"
+  fi
+  
   echo "Cleaning up..."
   rm -rf "$TEMP_DIR"
-
+  
   echo "Conversion complete! Output saved to $OUTPUT_MD"
-  echo "All images have been uploaded to Imgur and references updated."
+  if [ "$HAS_IMAGES" = true ]; then
+    echo "Images have been uploaded to Imgur and references added."
+  else
+    echo "No images were processed."
+  fi
   
   return 0
 }

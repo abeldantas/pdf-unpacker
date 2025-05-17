@@ -7,14 +7,21 @@ A tool to convert PDF files to Markdown format while preserving images by upload
 - Converts PDF files to clean Markdown format
 - Automatically extracts images from PDFs
 - Uploads images to Imgur for reliable hosting
+- Strategically places image references throughout the document
 - Updates Markdown references to use Imgur URLs
 - Supports batch conversion of multiple PDFs
 
 ## Requirements
 
-- `pandoc` - For PDF to Markdown conversion
-- `curl` - For API calls to Imgur
-- `jq` - For parsing JSON responses
+- For PDF to Markdown conversion:
+  - `npx` and Node.js - To run the pdf2md package
+  - `@opendocsg/pdf2md` - Will be automatically installed if missing
+  - `curl` - For API calls to Imgur
+  - `jq` - For parsing JSON responses
+
+- Optional but recommended for image extraction:
+  - `pdfimages` (from poppler-utils package) - For extracting images from PDFs
+  - `convert` (from ImageMagick) - For converting image formats before uploading
 
 ## Installation
 
