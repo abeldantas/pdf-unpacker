@@ -33,7 +33,7 @@ A tool to convert PDF files to Markdown format while preserving images by upload
 
 2. Make the script executable:
    ```bash
-   chmod +x pdf2markdown
+   chmod +x pdf2md
    ```
 
 3. Create a `.env` file with your Imgur credentials:
@@ -45,12 +45,31 @@ A tool to convert PDF files to Markdown format while preserving images by upload
    IMGUR_REFRESH_TOKEN=your_refresh_token
    ```
 
+4. (Optional) Install the script globally:
+   ```bash
+   # Create bin directory if it doesn't exist
+   mkdir -p ~/bin
+   
+   # Copy the script to bin directory
+   cp pdf2md ~/bin/
+   
+   # Add ~/bin to PATH (if not already in your PATH)
+   echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc  # For zsh
+   # OR
+   echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc  # For bash
+   
+   # Apply changes to current shell
+   source ~/.zshrc  # For zsh
+   # OR
+   source ~/.bashrc  # For bash
+   ```
+
 ## Usage
 
 ### Converting a Single PDF
 
 ```bash
-./pdf2markdown input.pdf [output.md]
+pdf2md input.pdf [output.md]
 ```
 
 If you don't specify an output file, it will use the same name as the input file with a `.md` extension.
@@ -58,7 +77,7 @@ If you don't specify an output file, it will use the same name as the input file
 ### Batch Converting Multiple PDFs
 
 ```bash
-./pdf2markdown --folder path/to/pdfs output/dir
+pdf2md --folder path/to/pdfs output/dir
 ```
 
 This will convert all PDF files in the specified directory and save the Markdown files to the output directory.
