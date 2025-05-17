@@ -1,0 +1,201 @@
+#!/bin/bash
+
+# pdf2markdown - Convert PDF to Markdown with Imgur image hosting
+# Usage: 
+#   Single file: ./pdf2markdown input.pdf [output.md]
+#   Folder: ./pdf2markdown --folder path/to/pdfs output/dir
+
+set -e
+
+# Check dependencies
+command -v pandoc >/dev/null 2>&1 || { echo "Error: pandoc is required but not installed. Aborting."; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "Error: curl is required but not installed. Aborting."; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "Error: jq is required but not installed. Aborting."; exit 1; }
+
+# Load environment variables
+if [ -f .env ]; then
+  source .env
+else
+  echo "Error: .env file not found. Please create one with your Imgur credentials."
+  exit 1
+fi
+
+# Check if Imgur credentials are set
+if [ -z "$IMGUR_CLIENT_ID" ] || [ -z "$IMGUR_ACCESS_TOKEN" ]; then
+  echo "Error: Imgur credentials not found in .env file."
+  exit 1
+fi
+
+# Function to convert a single PDF file
+convert_single_pdf() {
+  local INPUT_PDF="$1"
+  local OUTPUT_MD="$2"
+
+  # Check if input file exists
+  if [ ! -f "$INPUT_PDF" ]; then
+    echo "Error: Input file '$INPUT_PDF' not found."
+    return 1
+  fi
+
+  # Create a temporary directory for image extraction
+  local TEMP_DIR="temp_$(date +%s)"
+  mkdir -p "$TEMP_DIR"
+
+  echo "Converting PDF to Markdown..."
+  pandoc -f pdf -t markdown "$INPUT_PDF" -o "$TEMP_DIR/temp.md" --extract-media="$TEMP_DIR"
+
+  # Find all images in the markdown file
+  echo "Processing images..."
+  local IMAGE_REFS=$(grep -o '!\[.*\](.*media/.*\.[a-zA-Z]*\([ )]"\{0,1\}[^"]*"\{0,1\}[ )]\))' "$TEMP_DIR/temp.md" || true)
+
+  # Copy the markdown file for processing
+  cp "$TEMP_DIR/temp.md" "$TEMP_DIR/processed.md"
+
+  # Count for progress tracking
+  local TOTAL_IMAGES=$(echo "$IMAGE_REFS" | wc -l)
+  local CURRENT=0
+
+  # Process each image reference
+  echo "$IMAGE_REFS" | while read -r REF; do
+    if [ -z "$REF" ]; then
+      continue
+    fi
+    
+    CURRENT=$((CURRENT + 1))
+    
+    # Extract the image path
+    local IMAGE_PATH=$(echo "$REF" | sed -n 's/.*(\(.*\)).*/\1/p')
+    
+    # Clean up the path (remove potential quotes)
+    IMAGE_PATH=$(echo "$IMAGE_PATH" | tr -d '"')
+    
+    # Make the path absolute if it's relative to the temp dir
+    local FULL_PATH
+    if [[ "$IMAGE_PATH" == *"$TEMP_DIR"* ]]; then
+      FULL_PATH="$IMAGE_PATH"
+    else
+      FULL_PATH="$TEMP_DIR/$IMAGE_PATH"
+    fi
+    
+    # Check if file exists
+    if [ ! -f "$FULL_PATH" ]; then
+      echo "Warning: Image file not found: $FULL_PATH"
+      continue
+    fi
+    
+    echo "[$CURRENT/$TOTAL_IMAGES] Uploading $(basename "$FULL_PATH") to Imgur..."
+    
+    # Upload the image to Imgur
+    local RESPONSE=$(curl -s -X POST \
+      "https://api.imgur.com/3/image" \
+      -H "Authorization: Bearer $IMGUR_ACCESS_TOKEN" \
+      -F "image=@$FULL_PATH")
+    
+    # Extract the image URL from the response
+    local IMGUR_URL=$(echo "$RESPONSE" | jq -r '.data.link')
+    
+    if [[ "$IMGUR_URL" == "null" || -z "$IMGUR_URL" ]]; then
+      echo "Error uploading image to Imgur:"
+      echo "$RESPONSE" | jq '.'
+      continue
+    fi
+    
+    echo "Image uploaded successfully: $IMGUR_URL"
+    
+    # Escape special characters in the reference for sed
+    local ESCAPED_REF=$(echo "$REF" | sed 's/[\/&]/\\&/g')
+    
+    # Create the new reference with Imgur URL
+    local NEW_REF=$(echo "$REF" | sed "s#(.*#($IMGUR_URL)#")
+    local ESCAPED_NEW_REF=$(echo "$NEW_REF" | sed 's/[\/&]/\\&/g')
+    
+    # Replace the image reference in the markdown file
+    sed -i "s#$ESCAPED_REF#$ESCAPED_NEW_REF#g" "$TEMP_DIR/processed.md"
+  done
+
+  # Copy the processed file to the final destination
+  cp "$TEMP_DIR/processed.md" "$OUTPUT_MD"
+
+  echo "Cleaning up..."
+  rm -rf "$TEMP_DIR"
+
+  echo "Conversion complete! Output saved to $OUTPUT_MD"
+  echo "All images have been uploaded to Imgur and references updated."
+  
+  return 0
+}
+
+# Function to convert a folder of PDF files
+convert_folder() {
+  local SOURCE_DIR="$1"
+  local OUTPUT_DIR="$2"
+
+  # Check if source directory exists
+  if [ ! -d "$SOURCE_DIR" ]; then
+    echo "Error: Source directory '$SOURCE_DIR' not found."
+    return 1
+  fi
+
+  # Create output directory if it doesn't exist
+  mkdir -p "$OUTPUT_DIR"
+
+  # Find all PDF files in the source directory
+  echo "Finding PDF files in $SOURCE_DIR..."
+  local PDF_FILES=$(find "$SOURCE_DIR" -name "*.pdf" -type f)
+
+  # Count files for progress tracking
+  local TOTAL_FILES=$(echo "$PDF_FILES" | wc -l)
+  local CURRENT=0
+
+  echo "Found $TOTAL_FILES PDF files to convert."
+
+  # Process each PDF file
+  echo "$PDF_FILES" | while read -r PDF_FILE; do
+    if [ -z "$PDF_FILE" ]; then
+      continue
+    fi
+    
+    CURRENT=$((CURRENT + 1))
+    local FILENAME=$(basename "$PDF_FILE")
+    local OUTPUT_FILENAME="${FILENAME%.pdf}.md"
+    local OUTPUT_PATH="$OUTPUT_DIR/$OUTPUT_FILENAME"
+    
+    echo "[$CURRENT/$TOTAL_FILES] Converting $FILENAME to Markdown..."
+    
+    # Call the conversion function
+    convert_single_pdf "$PDF_FILE" "$OUTPUT_PATH"
+  done
+
+  echo "Batch conversion complete! All files have been converted and saved to $OUTPUT_DIR"
+  
+  return 0
+}
+
+# Main execution logic
+if [ "$1" = "--folder" ]; then
+  # Check if source directory and output directory were provided
+  if [ -z "$2" ] || [ -z "$3" ]; then
+    echo "Usage for folder conversion: $0 --folder path/to/pdfs output/dir"
+    exit 1
+  fi
+  
+  # Convert folder
+  convert_folder "$2" "$3"
+else
+  # Check if a PDF file was provided
+  if [ -z "$1" ]; then
+    echo "Usage: $0 input.pdf [output.md]"
+    echo "       $0 --folder path/to/pdfs output/dir"
+    exit 1
+  fi
+  
+  # Set output filename
+  if [ -z "$2" ]; then
+    OUTPUT_MD="${1%.pdf}.md"
+  else
+    OUTPUT_MD="$2"
+  fi
+  
+  # Convert single file
+  convert_single_pdf "$1" "$OUTPUT_MD"
+fi

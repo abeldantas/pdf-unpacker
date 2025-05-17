@@ -1,0 +1,12 @@
+# Environment variables
+.env
+
+# Temporary files
+temp/
+*.tmp
+
+# Converted files 
+*.md.backup
+
+# Image extraction folders
+**/extracted-media/
